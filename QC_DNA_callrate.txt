@@ -1,0 +1,426 @@
+############################################################
+# QUALITY CONTROL EXPLORATORY ANALYSIS
+# DNA amount, genotype call rate and QC outcome
+#
+# Project:
+# Evaluation of DNA Quality and Case-Cohort Analysis of
+# Endometrial Cancer-Associated SNPs
+#
+# Purpose:
+# This script explores whether total DNA amount is related to
+# genotyping performance and sample-level QC outcome.
+############################################################
+
+
+############################################################
+# 0. Load required libraries
+############################################################
+
+# readxl is used to read Excel files.
+# dplyr is used for data manipulation.
+# ggplot2 is used for plotting.
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+
+############################################################
+# 1. Load QC statistics file
+############################################################
+
+# Load the tab-separated file containing QC statistics from genotyping.
+# Main variables expected:
+#   LABEL_ID      -> sample identifier
+#   QC_pass       -> TRUE/FALSE indicating whether the sample passed QC
+#   totdna_ng     -> total DNA amount in ng
+#   call_rate_raw -> raw genotype call rate, equivalent to 1 - F_MISS
+data <- read.delim(
+  "WK-3864_241205_QCstats.tsv",
+  header = TRUE,
+  sep = "\t"
+)
+
+
+############################################################
+# 2. Inspect the structure of the dataset
+############################################################
+
+# Show variable names, variable types and first values.
+str(data)
+
+# Count the total number of rows in the QC file.
+nrow(data)
+
+# Count how many samples passed or failed QC.
+table(data$QC_pass)
+
+# Check whether all rows correspond to unique sample IDs.
+# This is important to determine whether the dataset contains duplicates.
+nrow(data)                         # total rows
+length(unique(data$LABEL_ID))      # unique samples
+sum(duplicated(data$LABEL_ID))     # duplicated sample IDs
+
+
+############################################################
+# 3. Compare QC file with DNA extraction Excel file
+############################################################
+
+# Load the Excel file containing DNA extraction/concentration data.
+# This file path may need to be modified depending on the computer.
+excel_data <- read_excel(
+  "C:/Users/crirui/OneDrive - Karolinska Institutet/Documents/Data_first_round/XL-4188_250410_Conc_TotalDNA_KI_karinsunstrom1stround.xlsx",
+  sheet = "Sheet1"
+)
+
+# Compare the number of rows in both datasets.
+nrow(excel_data)
+nrow(data)
+
+# Check direct overlap between sample identifiers from both files.
+# In this analysis, there were 0 direct matches, suggesting that the
+# two files did not contain exactly the same sample IDs, or that the ID
+# format differed between files.
+sum(data$LABEL_ID %in% excel_data$Sample_ID)
+
+# Inspect the first sample IDs from both files to compare their format.
+head(data$LABEL_ID)
+head(excel_data$Sample_ID)
+
+# Check the data type of both ID columns.
+str(data$LABEL_ID)
+str(excel_data$Sample_ID)
+
+# Extract the suffix after the last hyphen from each sample ID.
+# This was used to explore whether the two datasets shared similar
+# year/code patterns despite the lack of direct ID matches.
+excel_year <- sub(".*-", "", excel_data$Sample_ID)
+tsv_year   <- sub(".*-", "", data$LABEL_ID)
+
+# Show the most common suffixes in the QC file.
+table(tsv_year) |> sort(decreasing = TRUE) |> head(10)
+
+# Show the most common suffixes in the DNA extraction Excel file.
+table(excel_year) |> sort(decreasing = TRUE) |> head(10)
+
+# Interpretation:
+# The QC statistics dataset and the DNA extraction Excel file did not
+# appear to correspond to exactly the same set of sample identifiers.
+
+
+############################################################
+# 4. Clean and define variables
+############################################################
+
+# Convert LABEL_ID to character and remove leading/trailing spaces.
+data$LABEL_ID <- trimws(as.character(data$LABEL_ID))
+
+# Convert total DNA and call rate variables to numeric.
+data$totdna_ng <- as.numeric(data$totdna_ng)
+data$call_rate_raw <- as.numeric(data$call_rate_raw)
+
+# Convert QC_pass to logical if needed and create QC_fail.
+# QC_fail is the opposite of QC_pass.
+df <- data %>%
+  mutate(
+    LABEL_ID = as.character(LABEL_ID),
+    totdna_ng = as.numeric(totdna_ng),
+    call_rate_raw = as.numeric(call_rate_raw),
+    QC_pass = as.logical(QC_pass),
+    QC_fail = !QC_pass
+  )
+
+# Check that the cleaned dataset has the expected number of rows.
+nrow(df)
+
+# Count QC pass/fail after cleaning.
+table(df$QC_pass)
+
+
+############################################################
+# 5. Explore call rate by QC status
+############################################################
+
+# Summarise call rate statistics separately for QC pass and QC fail samples.
+# This helps evaluate whether failed samples generally have lower call rates.
+df %>%
+  group_by(QC_pass) %>%
+  summarise(
+    min_call = min(call_rate_raw, na.rm = TRUE),
+    max_call = max(call_rate_raw, na.rm = TRUE),
+    mean_call = mean(call_rate_raw, na.rm = TRUE),
+    median_call = median(call_rate_raw, na.rm = TRUE),
+    n = n()
+  )
+
+# Count how many samples have a call rate below the common threshold of 0.98.
+# This threshold was part of the QC criteria.
+sum(df$call_rate_raw < 0.98, na.rm = TRUE)
+
+# Interpretation:
+# If the number of QC failures differs from the number of samples below
+# call rate 0.98, QC status is not determined exclusively by call rate.
+# Other QC metrics may also contribute, such as heterozygosity or sex checks.
+
+
+############################################################
+# 6. Descriptive summary of QC outcome, DNA amount and call rate
+############################################################
+
+# Counts of QC pass/fail.
+qc_counts <- table(df$QC_pass)
+qc_counts
+
+# Proportions of QC pass/fail.
+qc_props <- prop.table(qc_counts)
+qc_props
+
+# Descriptive statistics of total DNA amount.
+summary(df$totdna_ng)
+
+# Descriptive statistics of raw call rate.
+summary(df$call_rate_raw)
+
+
+############################################################
+# 7. Boxplot of call rate by QC status
+############################################################
+
+# This plot compares the distribution of call rate between samples that
+# passed and failed QC.
+p <- ggplot(df, aes(x = QC_pass, y = call_rate_raw, fill = QC_pass)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  labs(
+    title = "Genotype call rate by QC status",
+    x = "QC status",
+    y = "Call rate (1 - F_MISS)"
+  ) +
+  theme_minimal()
+
+p
+
+
+############################################################
+# 8. Create year/code suffix variable from LABEL_ID
+############################################################
+
+# Extract the suffix after the last hyphen from LABEL_ID.
+# This was used to explore the distribution of sample ID suffixes.
+df$year_suffix <- sub(".*-", "", df$LABEL_ID)
+
+# Show the most common suffix values.
+table(df$year_suffix) %>%
+  sort(decreasing = TRUE) %>%
+  head(15)
+
+
+############################################################
+# 9. Create broad DNA amount bins
+############################################################
+
+# Create three broad bins of total DNA amount:
+#   [0,100) ng
+#   [100,200) ng
+#   [200,Inf) ng
+df$dna_bin3 <- cut(
+  df$totdna_ng,
+  breaks = c(0, 100, 200, Inf),
+  labels = c("[0,100)", "[100,200)", "[200,Inf)"),
+  right = FALSE
+)
+
+# Cross-tabulate DNA bin and QC outcome.
+tab_bin3 <- table(df$dna_bin3, df$QC_pass)
+tab_bin3
+
+# Calculate row proportions to see QC pass/fail proportions within each DNA bin.
+prop_bin3 <- prop.table(tab_bin3, 1)
+prop_bin3
+
+
+############################################################
+# 10. Plot QC pass/fail proportions by broad DNA bin
+############################################################
+
+# This plot shows the proportion of QC pass/fail samples within each DNA bin.
+ggplot(df, aes(x = dna_bin3, fill = QC_pass)) +
+  geom_bar(position = "fill") +
+  labs(
+    x = "Total DNA (ng) bin",
+    y = "Proportion",
+    title = "QC pass/fail by DNA amount (proportion)"
+  ) +
+  theme_minimal()
+
+
+############################################################
+# 11. Plot QC pass/fail counts by broad DNA bin
+############################################################
+
+# This plot shows the absolute number of pass/fail samples within each DNA bin.
+ggplot(df, aes(x = dna_bin3, fill = QC_pass)) +
+  geom_bar(position = "stack") +
+  labs(
+    x = "Total DNA (ng) bin",
+    y = "Count",
+    title = "QC pass/fail by DNA amount (count)"
+  ) +
+  theme_minimal()
+
+
+############################################################
+# 12. Create finer DNA amount bins of 20 ng
+############################################################
+
+# Create breaks from 0 to 200 ng every 20 ng, plus a final category above 200 ng.
+breaks_20 <- c(seq(0, 200, by = 20), Inf)
+
+# Create labels for the 20 ng bins.
+labels_20 <- c(
+  paste0("[", seq(0, 180, by = 20), ",", seq(20, 200, by = 20), ")"),
+  "[200,Inf)"
+)
+
+# Assign each sample to a 20 ng DNA bin.
+df$dna_bin20 <- cut(
+  df$totdna_ng,
+  breaks = breaks_20,
+  labels = labels_20,
+  right = FALSE
+)
+
+# Cross-tabulate fine DNA bins and QC outcome.
+tab_bin20 <- table(df$dna_bin20, df$QC_pass)
+tab_bin20
+
+# Calculate row proportions by fine DNA bin.
+prop.table(tab_bin20, 1)
+
+
+############################################################
+# 13. Plot QC pass/fail proportions by 20 ng DNA bin
+############################################################
+
+# This plot helps identify whether QC failure becomes more common below
+# a certain DNA amount threshold.
+ggplot(df, aes(x = dna_bin20, fill = QC_pass)) +
+  geom_bar(position = "fill") +
+  labs(
+    x = "Total DNA (ng) bin (20 ng)",
+    y = "Proportion",
+    title = "QC pass/fail by DNA amount (20 ng bins)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+############################################################
+# 14. Scatter plot: total DNA amount vs call rate
+############################################################
+
+# This plot evaluates the relationship between total DNA amount and
+# genotyping call rate.
+# The x-axis is shown on a log10 scale because DNA amount is often
+# right-skewed, with some samples having much higher DNA values.
+ggplot(df, aes(x = totdna_ng, y = call_rate_raw, color = QC_pass)) +
+  geom_point(alpha = 0.7) +
+  scale_x_log10() +
+  labs(
+    x = "Total DNA (ng, log10 scale)",
+    y = "Raw call rate (1 - F_MISS)",
+    title = "Raw genotype call rate by DNA amount"
+  ) +
+  theme_minimal()
+
+
+############################################################
+# 15. Identify unusual samples: high DNA amount but QC failure
+############################################################
+
+# Identify samples with high DNA amount that still failed QC.
+# This checks whether DNA quantity alone explains QC outcome.
+highDNA_fail <- df %>%
+  filter(totdna_ng >= 200, QC_pass == FALSE) %>%
+  arrange(call_rate_raw)
+
+# Count high-DNA QC failures.
+cat("QC failures with DNA >= 200 ng:", nrow(highDNA_fail), "\n")
+
+# Show the first 20 high-DNA QC failures, ordered by call rate.
+head(highDNA_fail, 20)
+
+# Explore the suffix/year distribution among these high-DNA QC failures.
+table(highDNA_fail$year_suffix)
+
+
+############################################################
+# 16. Threshold analysis: DNA amount vs QC failure
+############################################################
+
+# The purpose of this analysis is to evaluate what would happen if
+# minimum DNA amount thresholds were applied before genotyping.
+# For each threshold, the code calculates:
+#   - number of retained samples
+#   - fraction of retained samples
+#   - QC failure rate among retained samples
+#   - number of QC failures avoided by dropping low-DNA samples
+#   - number of QC-pass samples lost by dropping low-DNA samples
+
+thresholds <- c(50, 100, 150, 200)
+
+results <- lapply(thresholds, function(t) {
+
+  # Samples retained if their DNA amount is equal to or above threshold.
+  kept <- df[df$totdna_ng >= t, ]
+
+  # Samples dropped if their DNA amount is below threshold.
+  dropped <- df[df$totdna_ng < t, ]
+
+  data.frame(
+    threshold_ng = t,
+    n_kept = nrow(kept),
+    kept_fraction = nrow(kept) / nrow(df),
+    fail_rate_kept = mean(kept$QC_fail, na.rm = TRUE),
+    fails_avoided = sum(dropped$QC_fail, na.rm = TRUE),
+    passes_lost = sum(dropped$QC_pass, na.rm = TRUE)
+  )
+})
+
+# Combine the list of results into one data frame.
+results <- do.call(rbind, results)
+
+# View threshold analysis results.
+results
+
+# Export threshold analysis to CSV.
+write.csv(results, "threshold_analysis.csv", row.names = FALSE)
+
+
+############################################################
+# 17. Plot sample retention by DNA threshold
+############################################################
+
+# This graph shows the fraction of samples retained at different
+# minimum DNA amount thresholds.
+fig3 <- ggplot(results, aes(x = threshold_ng, y = kept_fraction)) +
+  geom_line(size = 1) +
+  geom_point(size = 3) +
+  labs(
+    title = "Sample retention vs DNA threshold",
+    x = "Minimum DNA threshold (ng)",
+    y = "Fraction of samples retained"
+  ) +
+  theme_minimal()
+
+fig3
+
+
+############################################################
+# 18. save cleaned objects
+############################################################
+
+# Save the cleaned dataframe and threshold results as RDS files.
+# These can be reloaded later without repeating the full script.
+saveRDS(df, "qc_cleaned_dataframe.rds")
+saveRDS(results, "threshold_analysis_results.rds")
+
