@@ -1,0 +1,422 @@
+############################################################
+# SNP SELECTION, PLINK ASSOCIATION RESULTS AND META-ANALYSIS
+
+
+
+############################################################
+# 0. Load required libraries
+############################################################
+
+library(readr)
+library(dplyr)
+library(openxlsx)
+library(ggplot2)
+
+
+############################################################
+# 1. Define project paths
+############################################################
+
+# Folder containing GWAS Catalog SNP export files.
+snps_path <- "C:/Users/crirui/OneDrive - Karolinska Institutet/Documents/SNPS"
+
+# Association result files from PLINK2.
+round1_glm_file <- "snps_new_analysis_plink2_correct.PHENO1.glm.logistic.hybrid"
+round2_glm_file <- "snps_round2_glm.PHENO1.glm.logistic.hybrid"
+
+
+############################################################
+# 2. Load GWAS Catalog association export files
+############################################################
+
+snps1 <- read.delim(file.path(snps_path, "EFO_0004230_associations_export.tsv"))
+snps2 <- read.delim(file.path(snps_path, "EFO_1001514_associations_export.tsv"))
+snps3 <- read.delim(file.path(snps_path, "MONDO_0002447_associations_export.tsv"))
+snps4 <- read.delim(file.path(snps_path, "MONDO_0005213_associations_export.tsv"))
+snps5 <- read.delim(file.path(snps_path, "MONDO_0006003_associations_export.tsv"))
+
+
+############################################################
+# 3. Clean SNP identifiers from GWAS Catalog files
+############################################################
+
+# GWAS Catalog riskAllele is often written as "rsID-allele".
+# Example: "rs7501939-A". This step keeps only the rsID.
+snps1$SNP_clean <- gsub("-.*$", "", snps1$riskAllele)
+snps2$SNP_clean <- gsub("-.*$", "", snps2$riskAllele)
+snps3$SNP_clean <- gsub("-.*$", "", snps3$riskAllele)
+snps4$SNP_clean <- gsub("-.*$", "", snps4$riskAllele)
+snps5$SNP_clean <- gsub("-.*$", "", snps5$riskAllele)
+
+
+############################################################
+# 4. Define final candidate SNP list
+############################################################
+
+# This list contains SNPs selected from GWAS literature and GWAS Catalog
+# exports. It includes variants associated with endometrial cancer,
+# broader cancer traits and pleiotropic traits.
+snps_list <- unique(c(
+  "rs1123573", "rs4442975", "rs4135275", "rs7612543",
+  "rs11927381", "rs9349553", "rs72915912", "rs62466318",
+  "rs34670419", "rs7463708", "rs12682374", "rs1679014",
+  "rs657152", "rs1219651", "rs2237896", "rs78540526",
+  "rs117610694", "rs12184995", "rs7183977", "rs11651755",
+  "rs7501939", "rs12449442", "rs143384", "rs673604",
+  "rs3773582", "rs1777220", "rs11150038", "rs12970291",
+  "rs3184504", "rs4282438", "rs8067378", "rs9277952",
+  "rs2856437", "rs2242660", "rs3131631", "rs117960705",
+  "rs2239704", "rs2516448", "rs3129795", "rs2530710",
+  "rs4077818"
+))
+
+# Export the SNP list to a text file for PLINK extraction.
+write.table(
+  snps_list,
+  file = "snps_list.txt",
+  sep = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  quote = FALSE
+)
+
+
+############################################################
+# 5. Compare selected SNPs with GWAS Catalog exports
+############################################################
+
+# Count how many selected SNPs appear in each GWAS Catalog export file.
+sum(snps_list %in% snps1$SNP_clean)
+sum(snps_list %in% snps2$SNP_clean)
+sum(snps_list %in% snps3$SNP_clean)
+sum(snps_list %in% snps4$SNP_clean)
+sum(snps_list %in% snps5$SNP_clean)
+
+
+############################################################
+# 6. Optional: read older PLINK association output
+############################################################
+
+# This block reads a previous PLINK association file.
+# It is kept for traceability, but the final analysis below uses PLINK2 GLM.
+assoc_new <- read.table(
+  "P:/H9_Dillner/PROJECTS/PsyCan/Data/SNP data EmCa/Data_16-APR-2026/DerivedData/QC/rp_emc/qc/snps_new_analysis.assoc.logistic",
+  header = TRUE,
+  stringsAsFactors = FALSE
+)
+
+# Keep only additive model results.
+assoc_add <- subset(assoc_new, TEST == "ADD")
+
+# Identify nominally significant SNPs.
+assoc_sig <- subset(assoc_add, P < 0.05)
+
+# Bonferroni correction for the older association output.
+n_tests <- nrow(assoc_add)
+assoc_add$P_bonf <- assoc_add$P * n_tests
+
+
+############################################################
+# 7. Read PLINK2 GLM logistic results from Round 1
+############################################################
+
+glm1 <- read.table(
+  round1_glm_file,
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  comment.char = ""
+)
+
+# Rename first column if PLINK uses "#CHROM".
+names(glm1)[1] <- "CHROM"
+
+# Keep only additive model.
+glm_add <- subset(glm1, TEST == "ADD")
+
+# Clean SNP IDs by removing technical prefixes.
+glm_add$ID <- gsub("^GSA-|^exm-", "", glm_add$ID)
+
+# Convert beta to odds ratio.
+glm_add$OR <- exp(glm_add$BETA)
+
+# Compact table for Round 1.
+tabla_glm_round1 <- glm_add[, c("ID", "A1", "A1_FREQ", "OR", "P")]
+
+
+############################################################
+# 8. Read PLINK2 GLM logistic results from Round 2
+############################################################
+
+glm2 <- read.table(
+  round2_glm_file,
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  comment.char = ""
+)
+
+names(glm2)[1] <- "CHROM"
+
+# Keep only additive model.
+glm2_add <- subset(glm2, TEST == "ADD")
+
+# Clean SNP IDs and calculate OR.
+glm2_add$ID <- gsub("^GSA-|^exm-", "", glm2_add$ID)
+glm2_add$OR <- exp(glm2_add$BETA)
+
+# Compact table for Round 2.
+tabla_glm_round2 <- glm2_add[, c("ID", "A1", "A1_FREQ", "OR", "P")]
+
+write.xlsx(
+  tabla_glm_round2,
+  file = "tabla_glm_round2.xlsx",
+  rowNames = FALSE
+)
+
+
+############################################################
+# 9. Prepare Round 1 and Round 2 tables for meta-analysis
+############################################################
+
+# Keep only the variables needed for inverse-variance meta-analysis.
+r1 <- glm_add[, c("ID", "A1", "BETA", "SE", "P")]
+r2 <- glm2_add[, c("ID", "A1", "BETA", "SE", "P")]
+
+# Clean SNP IDs again for safety.
+r1$ID <- gsub("^GSA-|^exm-", "", r1$ID)
+r2$ID <- gsub("^GSA-|^exm-", "", r2$ID)
+
+
+############################################################
+# 10. Merge Round 1 and Round 2 association results
+############################################################
+
+# Merge by SNP ID.
+meta_df <- merge(r1, r2, by = "ID", suffixes = c("_R1", "_R2"))
+
+# Check if effect alleles are the same between rounds.
+meta_df$Same_A1 <- meta_df$A1_R1 == meta_df$A1_R2
+meta_df[, c("ID", "A1_R1", "A1_R2", "Same_A1")]
+
+# Important:
+# Betas can only be combined directly if they refer to the same effect allele.
+# If Same_A1 is FALSE, allele harmonization is required.
+if (any(meta_df$Same_A1 == FALSE)) {
+  warning("Some SNPs have different effect alleles between rounds. Harmonization is required before combining betas.")
+}
+
+# In this script, Round 2 beta is assumed to be aligned.
+# If harmonization is required, replace this column with harmonized betas.
+meta_df$BETA_R2_aligned <- meta_df$BETA_R2
+
+
+############################################################
+# 11. Fixed-effect inverse-variance meta-analysis
+############################################################
+
+# Calculate inverse-variance weights.
+meta_df$w1 <- 1 / (meta_df$SE_R1^2)
+meta_df$w2 <- 1 / (meta_df$SE_R2^2)
+
+# Weighted fixed-effect beta.
+meta_df$BETA_meta <- (
+  meta_df$w1 * meta_df$BETA_R1 +
+    meta_df$w2 * meta_df$BETA_R2_aligned
+) / (meta_df$w1 + meta_df$w2)
+
+# Standard error of combined beta.
+meta_df$SE_meta <- sqrt(1 / (meta_df$w1 + meta_df$w2))
+
+# Odds ratio, Z statistic and p-value.
+meta_df$OR_meta <- exp(meta_df$BETA_meta)
+meta_df$Z_meta <- meta_df$BETA_meta / meta_df$SE_meta
+meta_df$P_meta <- 2 * pnorm(-abs(meta_df$Z_meta))
+
+# 95% confidence interval for OR.
+meta_df$CI_lower <- exp(meta_df$BETA_meta - 1.96 * meta_df$SE_meta)
+meta_df$CI_upper <- exp(meta_df$BETA_meta + 1.96 * meta_df$SE_meta)
+
+# Bonferroni correction.
+meta_df$P_meta_bonf <- p.adjust(meta_df$P_meta, method = "bonferroni")
+
+
+############################################################
+# 12. Direction consistency between rounds
+############################################################
+
+meta_df$Direction_R1 <- ifelse(meta_df$BETA_R1 > 0, "Risk", "Protective")
+meta_df$Direction_R2 <- ifelse(meta_df$BETA_R2_aligned > 0, "Risk", "Protective")
+meta_df$Direction_consistent <- meta_df$Direction_R1 == meta_df$Direction_R2
+
+
+############################################################
+# 13. Create final meta-analysis table
+############################################################
+
+meta_table <- meta_df[, c(
+  "ID",
+  "A1_R1", "A1_R2", "Same_A1",
+  "BETA_R1", "SE_R1", "P_R1",
+  "BETA_R2_aligned", "SE_R2", "P_R2",
+  "OR_meta", "CI_lower", "CI_upper",
+  "BETA_meta", "SE_meta", "P_meta", "P_meta_bonf",
+  "Direction_R1", "Direction_R2", "Direction_consistent"
+)]
+
+# Order by meta-analysis p-value.
+meta_table <- meta_table[order(meta_table$P_meta), ]
+
+write.xlsx(
+  meta_table,
+  file = "meta_analysis_results_clean_from_plink2.xlsx",
+  rowNames = FALSE
+)
+
+
+############################################################
+# 14. Forest plot of meta-analysis results
+############################################################
+
+ggplot(meta_df, aes(x = OR_meta, y = reorder(ID, OR_meta))) +
+  geom_point(size = 2) +
+  geom_errorbar(
+    aes(xmin = CI_lower, xmax = CI_upper),
+    width = 0.2,
+    orientation = "y"
+  ) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+  theme_minimal() +
+  labs(
+    x = "Odds Ratio (meta-analysis)",
+    y = "SNP",
+    title = "Forest plot of SNP associations"
+  )
+
+
+############################################################
+# 15. Scatter plot comparing effects between rounds
+############################################################
+
+ggplot(meta_df, aes(x = exp(BETA_R1), y = exp(BETA_R2_aligned))) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    x = "Odds Ratio Round 1",
+    y = "Odds Ratio Round 2",
+    title = "Comparison of SNP effects between rounds"
+  )
+
+
+############################################################
+# 16. Volcano plot
+############################################################
+
+ggplot(meta_df, aes(x = BETA_meta, y = -log10(P_meta))) +
+  geom_point() +
+  theme_minimal() +
+  labs(
+    x = "Meta-analysis beta",
+    y = "-log10(P-value)",
+    title = "Volcano plot of meta-analysis results"
+  )
+
+
+############################################################
+# 17. Candidate SNP association plot
+############################################################
+
+# This is a simplified Manhattan-style plot using SNP order.
+ggplot(meta_df, aes(x = seq_len(nrow(meta_df)), y = -log10(P_meta))) +
+  geom_point() +
+  theme_minimal() +
+  labs(
+    x = "SNP index",
+    y = "-log10(P-value)",
+    title = "Candidate SNP association plot"
+  )
+
+
+############################################################
+# 18. QQ plot of meta-analysis p-values
+############################################################
+
+observed <- -log10(sort(meta_df$P_meta))
+expected <- -log10(ppoints(length(meta_df$P_meta)))
+
+plot(
+  expected,
+  observed,
+  xlab = "Expected -log10(P-value)",
+  ylab = "Observed -log10(P-value)",
+  main = "QQ plot of meta-analysis p-values"
+)
+
+abline(0, 1, col = "red")
+
+
+############################################################
+# 19. Additional exploratory plots
+############################################################
+
+# Histogram of meta-analysis ORs.
+ggplot(meta_df, aes(x = OR_meta)) +
+  geom_histogram(bins = 10) +
+  theme_minimal() +
+  labs(
+    x = "Meta-analysis odds ratio",
+    y = "Count",
+    title = "Distribution of meta-analysis odds ratios"
+  )
+
+# Direction consistency plot.
+ggplot(meta_df, aes(x = Direction_consistent)) +
+  geom_bar() +
+  theme_minimal() +
+  labs(
+    x = "Direction consistent between rounds",
+    y = "Number of SNPs",
+    title = "Direction consistency between genotyping rounds"
+  )
+
+# Effect size vs standard error.
+ggplot(meta_df, aes(x = SE_meta, y = BETA_meta)) +
+  geom_point() +
+  theme_minimal() +
+  labs(
+    x = "Meta-analysis standard error",
+    y = "Meta-analysis beta",
+    title = "Effect size vs standard error"
+  )
+
+# Funnel-style plot.
+ggplot(meta_df, aes(x = BETA_meta, y = SE_meta)) +
+  geom_point() +
+  theme_minimal() +
+  labs(
+    x = "Meta-analysis beta",
+    y = "Meta-analysis standard error",
+    title = "Funnel-style plot"
+  )
+
+# OR vs p-value.
+ggplot(meta_df, aes(x = OR_meta, y = -log10(P_meta))) +
+  geom_point() +
+  theme_minimal() +
+  labs(
+    x = "Meta-analysis odds ratio",
+    y = "-log10(P-value)",
+    title = "Odds ratio vs statistical significance"
+  )
+
+
+############################################################
+# 20. Save key R objects
+############################################################
+
+saveRDS(snps_list, "candidate_snps_list.rds")
+saveRDS(glm_add, "round1_glm_additive_results.rds")
+saveRDS(glm2_add, "round2_glm_additive_results.rds")
+saveRDS(meta_df, "meta_analysis_dataframe.rds")
+saveRDS(meta_table, "meta_analysis_table.rds")
+
+
