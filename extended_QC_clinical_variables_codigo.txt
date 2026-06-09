@@ -1,0 +1,819 @@
+############################################################
+# EXTENDED QC ANALYSIS WITH CLINICAL VARIABLES
+# Age, cytology, HPV status, cohort/case status and QC outcome
+
+
+############################################################
+# 0. Load required libraries
+############################################################
+
+# readxl is used to read Excel files.
+# openxlsx is used to read/write Excel files.
+# dplyr is used for data manipulation.
+# ggplot2 is used for plotting.
+# forcats is used for factor handling.
+# ggpubr is used to add statistical comparisons to plots.
+# writexl is used to export tables to Excel.
+# pROC is used for ROC curves and AUC.
+library(readxl)
+library(openxlsx)
+library(dplyr)
+library(ggplot2)
+library(forcats)
+library(ggpubr)
+library(writexl)
+library(pROC)
+
+
+############################################################
+# 1. Load dataset with NKCx/clinical variables
+############################################################
+
+# This Excel file contains QC variables plus additional clinical
+# variables from NKCx, such as AGE, SNOMED/cytology and HPV diagnosis.
+data_final <- read_excel("WK-3864_241205_QCstats_NKCx_JW260310.xlsx")
+
+
+############################################################
+# 2. Initial inspection of the dataset
+############################################################
+
+# Inspect column names.
+names(data_final)
+
+# Inspect variable types.
+str(data_final)
+
+# Summary statistics for all variables.
+summary(data_final)
+
+# Count missing values by column.
+colSums(is.na(data_final))
+
+# Notes from initial inspection:
+# - SNOMED_WORST and SNOMED_SEVERITY contain many missing values.
+# - HPVDIAG and translation also contain many missing values.
+# - AGE has a small number of missing values.
+
+
+############################################################
+# 3. Convert variables to appropriate formats
+############################################################
+
+# Create working dataframe.
+df <- data_final
+
+# Convert variables to suitable types for analysis.
+df <- df %>%
+  mutate(
+    qc_pass = as.logical(qc_pass),
+    dna_total_ng = as.numeric(dna_total_ng),
+    call_rate = as.numeric(call_rate),
+    AGE = as.numeric(AGE),
+    SNOMED_WORST = as.character(SNOMED_WORST),
+    SNOMED_SEVERITY = as.numeric(SNOMED_SEVERITY),
+    HPVDIAG = as.character(HPVDIAG),
+    translation = as.character(translation),
+    collector_type = as.factor(collector_type),
+    year = as.factor(year)
+  )
+
+
+############################################################
+# 4. Descriptive overview of new variables
+############################################################
+
+# Number of total samples and non-missing values for each new variable.
+cat("Total samples:", nrow(df), "\n")
+cat("Samples with AGE:", sum(!is.na(df$AGE)), "\n")
+cat("Samples with SNOMED_WORST:", sum(!is.na(df$SNOMED_WORST)), "\n")
+cat("Samples with SNOMED_SEVERITY:", sum(!is.na(df$SNOMED_SEVERITY)), "\n")
+cat("Samples with HPVDIAG:", sum(!is.na(df$HPVDIAG)), "\n")
+cat("Samples with translation:", sum(!is.na(df$translation)), "\n")
+
+# Descriptive summary of age.
+summary(df$AGE)
+
+# Frequency tables for clinical variables.
+table(df$SNOMED_WORST, useNA = "ifany")
+table(df$SNOMED_SEVERITY, useNA = "ifany")
+table(df$HPVDIAG, useNA = "ifany")
+table(df$translation, useNA = "ifany")
+
+
+############################################################
+# 5. Create simplified cytology and HPV groups
+############################################################
+
+# Create broader cytology categories from SNOMED_SEVERITY.
+# Interpretation used in this script:
+#   < 4  -> poor_quality
+#   = 4  -> normal
+#   > 5  -> abnormal
+#   other values -> other
+#
+# Create broad HPV groups using HPVDIAG text:
+#   contains "pos" -> positive
+#   contains "neg" -> negative
+#   otherwise      -> other
+df <- df %>%
+  mutate(
+    cytology_group = case_when(
+      is.na(SNOMED_SEVERITY) ~ NA_character_,
+      SNOMED_SEVERITY < 4 ~ "poor_quality",
+      SNOMED_SEVERITY == 4 ~ "normal",
+      SNOMED_SEVERITY > 5 ~ "abnormal",
+      TRUE ~ "other"
+    ),
+    hpv_group = case_when(
+      is.na(HPVDIAG) ~ NA_character_,
+      grepl("pos", HPVDIAG, ignore.case = TRUE) ~ "positive",
+      grepl("neg", HPVDIAG, ignore.case = TRUE) ~ "negative",
+      TRUE ~ "other"
+    )
+  )
+
+# Define order of factor levels.
+df$cytology_group <- factor(
+  df$cytology_group,
+  levels = c("poor_quality", "normal", "abnormal", "other")
+)
+
+df$hpv_group <- factor(
+  df$hpv_group,
+  levels = c("negative", "positive", "other")
+)
+
+# Check distribution of the newly created groups.
+table(df$cytology_group, useNA = "ifany")
+table(df$hpv_group, useNA = "ifany")
+
+
+############################################################
+# 6. Age analysis
+############################################################
+
+# Summary of age by QC outcome.
+age_by_qc <- df %>%
+  group_by(qc_pass) %>%
+  summarise(
+    n = n(),
+    median_age = median(AGE, na.rm = TRUE),
+    IQR_age = IQR(AGE, na.rm = TRUE),
+    mean_age = mean(AGE, na.rm = TRUE),
+    sd_age = sd(AGE, na.rm = TRUE)
+  )
+
+age_by_qc
+
+# Wilcoxon rank-sum test to compare age between QC pass/fail groups.
+wilcox_age_qc <- wilcox.test(AGE ~ qc_pass, data = df)
+wilcox_age_qc
+
+# Spearman correlation between age and call rate.
+cor_age_callrate <- cor.test(
+  df$AGE,
+  df$call_rate,
+  method = "spearman",
+  use = "complete.obs"
+)
+
+cor_age_callrate
+
+# Spearman correlation between age and total DNA.
+cor_age_dna <- cor.test(
+  df$AGE,
+  df$dna_total_ng,
+  method = "spearman",
+  use = "complete.obs"
+)
+
+cor_age_dna
+
+# Age distribution.
+ggplot(df, aes(x = AGE)) +
+  geom_histogram(bins = 30) +
+  theme_minimal() +
+  labs(title = "Distribution of age", x = "Age", y = "Count")
+
+# Age by QC outcome.
+ggplot(df, aes(x = qc_pass, y = AGE)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Age by QC outcome", x = "QC pass", y = "Age")
+
+# Age vs call rate.
+ggplot(df, aes(x = AGE, y = call_rate)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  labs(title = "Age vs call rate", x = "Age", y = "Call rate")
+
+
+############################################################
+# 7. Cytology analysis
+############################################################
+
+# Keep only samples with cytology group available.
+cyto_df <- df %>%
+  filter(!is.na(cytology_group))
+
+cat("Number of samples with cytology information:", nrow(cyto_df), "\n")
+
+# Cross-tabulation: cytology group vs QC outcome.
+cyto_qc_table <- table(cyto_df$cytology_group, cyto_df$qc_pass)
+cyto_qc_table
+
+# Fisher's exact test is used because some categories may have
+# small expected counts.
+fisher_cyto_qc <- fisher.test(cyto_qc_table)
+fisher_cyto_qc
+
+# Descriptive statistics by cytology group.
+cyto_summary_extended <- cyto_df %>%
+  group_by(cytology_group) %>%
+  summarise(
+    n = n(),
+    median_call_rate = median(call_rate, na.rm = TRUE),
+    IQR_call_rate = IQR(call_rate, na.rm = TRUE),
+    median_dna = median(dna_total_ng, na.rm = TRUE),
+    IQR_dna = IQR(dna_total_ng, na.rm = TRUE)
+  )
+
+cyto_summary_extended
+
+# Kruskal-Wallis tests for continuous variables across cytology groups.
+kruskal_call_cyto <- kruskal.test(call_rate ~ cytology_group, data = cyto_df)
+kruskal_dna_cyto <- kruskal.test(dna_total_ng ~ cytology_group, data = cyto_df)
+
+kruskal_call_cyto
+kruskal_dna_cyto
+
+# Boxplot: call rate by cytology group.
+ggplot(cyto_df, aes(x = cytology_group, y = call_rate)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(
+    title = "Call rate by cytology group",
+    x = "Cytology group",
+    y = "Call rate"
+  )
+
+# Boxplot: DNA amount by cytology group.
+ggplot(cyto_df, aes(x = cytology_group, y = dna_total_ng)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(
+    title = "DNA amount by cytology group",
+    x = "Cytology group",
+    y = "DNA total (ng)"
+  )
+
+
+############################################################
+# 8. HPV analysis
+############################################################
+
+# Keep only samples with HPV group available.
+hpv_df <- df %>%
+  filter(!is.na(hpv_group))
+
+cat("Number of samples with HPV information:", nrow(hpv_df), "\n")
+
+# Cross-tabulation: HPV group vs QC outcome.
+hpv_qc_table <- table(hpv_df$hpv_group, hpv_df$qc_pass)
+hpv_qc_table
+
+# Fisher's exact test for HPV group vs QC outcome.
+fisher_hpv_qc <- fisher.test(hpv_qc_table)
+fisher_hpv_qc
+
+# Descriptive statistics by HPV group.
+hpv_summary_extended <- hpv_df %>%
+  group_by(hpv_group) %>%
+  summarise(
+    n = n(),
+    median_call_rate = median(call_rate, na.rm = TRUE),
+    IQR_call_rate = IQR(call_rate, na.rm = TRUE),
+    median_dna = median(dna_total_ng, na.rm = TRUE),
+    IQR_dna = IQR(dna_total_ng, na.rm = TRUE)
+  )
+
+hpv_summary_extended
+
+# Wilcoxon tests for two-group HPV comparison.
+# This is appropriate if hpv_group mainly includes negative and positive.
+wilcox_call_hpv <- wilcox.test(call_rate ~ hpv_group, data = hpv_df)
+wilcox_dna_hpv <- wilcox.test(dna_total_ng ~ hpv_group, data = hpv_df)
+
+wilcox_call_hpv
+wilcox_dna_hpv
+
+# Boxplot: call rate by HPV group with statistical comparison.
+ggplot(hpv_df, aes(x = hpv_group, y = call_rate)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(
+    title = "Call rate by HPV group",
+    x = "HPV group",
+    y = "Call rate"
+  ) +
+  stat_compare_means(method = "wilcox.test")
+
+# Boxplot: DNA amount by HPV group with statistical comparison.
+ggplot(hpv_df, aes(x = hpv_group, y = dna_total_ng)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(
+    title = "DNA amount by HPV group",
+    x = "HPV group",
+    y = "DNA total (ng)"
+  ) +
+  stat_compare_means(method = "wilcox.test")
+
+
+############################################################
+# 9. Extended logistic model including clinical variables
+############################################################
+
+# This model evaluates whether DNA amount, collector type, year, age,
+# HPV group and cytology group are associated with QC pass.
+# This model uses hpv_df, so only samples with HPV information are included.
+model_qc_hpv <- glm(
+  qc_pass ~ dna_total_ng + collector_type + year + AGE + hpv_group + cytology_group,
+  data = hpv_df,
+  family = binomial
+)
+
+summary(model_qc_hpv)
+
+
+############################################################
+# 10. Fast summary tables
+############################################################
+
+# Age by QC outcome.
+age_qc_summary <- df %>%
+  group_by(qc_pass) %>%
+  summarise(
+    n = n(),
+    median_age = median(AGE, na.rm = TRUE),
+    IQR_age = IQR(AGE, na.rm = TRUE)
+  )
+
+# Cytology summary.
+cyto_summary <- cyto_df %>%
+  group_by(cytology_group) %>%
+  summarise(
+    n = n(),
+    median_call_rate = median(call_rate, na.rm = TRUE),
+    median_dna = median(dna_total_ng, na.rm = TRUE)
+  )
+
+# HPV summary.
+hpv_summary <- hpv_df %>%
+  group_by(hpv_group) %>%
+  summarise(
+    n = n(),
+    median_call_rate = median(call_rate, na.rm = TRUE),
+    median_dna = median(dna_total_ng, na.rm = TRUE)
+  )
+
+age_qc_summary
+cyto_summary
+hpv_summary
+
+
+############################################################
+# 11. Load final dataset for cohort/case variable
+############################################################
+
+# This second Excel file contains the final dataset with cohort information.
+data1 <- read.xlsx(
+  "WK-3864_241205_QCstats_NKCx_JW260313.xlsx",
+  sheet = 1
+)
+
+# Create binary cohort variable.
+# In this coding:
+#   1 = case
+#   0 = cohort/control
+# The original logic assumes that missing cohort indicates case.
+data1 <- data1 %>%
+  mutate(
+    cohort_binary = ifelse(is.na(cohort), 1, 0)
+  )
+
+# Check distribution.
+table(data1$cohort_binary)
+
+# Bar plot of cases and cohort/control samples.
+ggplot(data1, aes(x = as.factor(cohort_binary))) +
+  geom_bar(fill = "skyblue") +
+  labs(
+    x = "Group",
+    y = "Count",
+    title = "Distribution of cases and cohort"
+  ) +
+  scale_x_discrete(labels = c("Cohort", "Case")) +
+  theme_minimal()
+
+
+############################################################
+# 12. QC outcome and cohort/case status
+############################################################
+
+# Cross-tabulation.
+table(data1$qc_pass, data1$cohort_binary)
+
+# Chi-square test between QC outcome and cohort/case status.
+chisq_qc_cohort <- chisq.test(table(data1$qc_pass, data1$cohort_binary))
+chisq_qc_cohort
+
+# Compare call rate between case and cohort groups.
+t_call_cohort <- t.test(call_rate ~ cohort_binary, data = data1)
+t_call_cohort
+
+
+############################################################
+# 13. Logistic model including cohort/case variable
+############################################################
+
+# Logistic regression model with QC pass as outcome.
+model_qc_cohort <- glm(
+  qc_pass ~ cohort_binary + HPVDIAG + SNOMED_WORST +
+    dna_total_ng + year + collector_type + AGE,
+  data = data1,
+  family = binomial
+)
+
+summary(model_qc_cohort)
+
+# Calculate odds ratios and 95% confidence intervals.
+odds_ratios <- exp(cbind(
+  OR = coef(model_qc_cohort),
+  confint(model_qc_cohort)
+))
+
+# Convert OR results to a table.
+odds_table <- as.data.frame(odds_ratios)
+
+# Add variable names.
+odds_table$Variable <- rownames(odds_table)
+
+# Rename and clean columns.
+odds_table <- odds_table %>%
+  rename(
+    OR = OR,
+    CI_lower = `2.5 %`,
+    CI_upper = `97.5 %`
+  ) %>%
+  select(Variable, OR, CI_lower, CI_upper) %>%
+  mutate(
+    across(c(OR, CI_lower, CI_upper), round, digits = 3)
+  )
+
+# View odds ratio table.
+odds_table
+
+# Export odds ratio table.
+write_xlsx(odds_table, "odds_ratios_table_qc_cohort.xlsx")
+
+
+############################################################
+# 14. Add cohort_binary to main dataframe
+############################################################
+
+# Add cohort_binary from data1 into df.
+# This assumes rows are in the same order in df and data1.
+# If not, merge by sample ID should be used instead.
+df$cohort_binary <- data1$cohort_binary
+
+# Create qc_fail variable:
+#   1 = QC fail
+#   0 = QC pass
+df$qc_fail <- ifelse(df$qc_pass == FALSE, 1, 0)
+
+
+############################################################
+# 15. Create refined HPV variable from translation
+############################################################
+
+# Create hpv_final using the detailed translation variable.
+df <- df %>%
+  mutate(
+    hpv_final = case_when(
+      is.na(translation) ~ "Missing",
+      translation == "HPV high risk types-negative" ~ "Negative",
+      translation == "HPV high risk types-positive" ~ "Other_high_risk",
+      translation == "HPV high risk type other than HPV16 or 18-positive" ~ "Other_high_risk",
+      translation == "HPV 16-positive" ~ "HPV16",
+      translation == "HPV 18-positive" ~ "HPV18",
+      TRUE ~ "Other"
+    )
+  )
+
+# HPV table.
+tabla_hpv <- as.data.frame(table(df$hpv_final))
+tabla_hpv
+
+
+############################################################
+# 16. Log-transform DNA total
+############################################################
+
+# DNA amount is usually right-skewed.
+# log(x + 1) is used to reduce skewness and keep zero values valid.
+df$log_dna <- log(df$dna_total_ng + 1)
+
+
+############################################################
+# 17. Handle missing values
+############################################################
+
+# Inspect missing values.
+colSums(is.na(df))
+
+# Add "Missing" level to cytology_group and replace NA values.
+df$cytology_group <- as.factor(df$cytology_group)
+levels(df$cytology_group) <- c(levels(df$cytology_group), "Missing")
+df$cytology_group[is.na(df$cytology_group)] <- "Missing"
+
+# If sample_year contains missing values, inspect them.
+# The original analysis replaced one missing sample_year with 2016.
+if ("sample_year" %in% names(df)) {
+  df[is.na(df$sample_year), ]
+  df$sample_year[is.na(df$sample_year)] <- 2016
+}
+
+# Check missing AGE or volume.
+# Some models exclude samples with missing AGE or volume.
+if ("volume" %in% names(df)) {
+  table(df$qc_fail[is.na(df$AGE) | is.na(df$volume)])
+  sum(is.na(df$AGE) | is.na(df$volume))
+
+  # Create complete-case dataset excluding samples with missing AGE or volume.
+  df_noNA <- df[!(is.na(df$AGE) | is.na(df$volume)), ]
+} else {
+  # If volume variable is not present, exclude only samples with missing AGE.
+  table(df$qc_fail[is.na(df$AGE)])
+  sum(is.na(df$AGE))
+
+  df_noNA <- df[!is.na(df$AGE), ]
+}
+
+
+############################################################
+# 18. Prepare variables for modelling
+############################################################
+
+# Convert variables to factor or numeric as required.
+df_noNA$collector_type <- as.factor(df_noNA$collector_type)
+df_noNA$cytology_group <- as.factor(df_noNA$cytology_group)
+df_noNA$hpv_final <- as.factor(df_noNA$hpv_final)
+
+if ("volume" %in% names(df_noNA)) {
+  df_noNA$volume <- as.factor(df_noNA$volume)
+}
+
+df_noNA$log_dna <- as.numeric(df_noNA$log_dna)
+df_noNA$AGE <- as.numeric(df_noNA$AGE)
+
+if ("sample_year" %in% names(df_noNA)) {
+  df_noNA$sample_year <- as.numeric(df_noNA$sample_year)
+}
+
+df_noNA$qc_fail <- as.factor(df_noNA$qc_fail)
+
+# Inspect final modelling dataset.
+str(df_noNA)
+
+
+############################################################
+# 19. Logistic regression models for QC failure
+############################################################
+
+# Short logistic model:
+# Outcome: qc_fail
+# Predictors: log-transformed DNA, collector type, cytology group,
+# and cohort/case status.
+modelround1_nocomplete <- glm(
+  qc_fail ~ log_dna + collector_type + cytology_group + cohort_binary,
+  data = df_noNA,
+  family = binomial
+)
+
+summary(modelround1_nocomplete)
+
+# Extended logistic model with additional variables.
+# This model includes HPV, age and sample year.
+if ("sample_year" %in% names(df_noNA)) {
+  modelround1_more_variables <- glm(
+    qc_fail ~ log_dna + collector_type + cytology_group +
+      hpv_final + AGE + sample_year,
+    data = df_noNA,
+    family = binomial
+  )
+} else {
+  modelround1_more_variables <- glm(
+    qc_fail ~ log_dna + collector_type + cytology_group +
+      hpv_final + AGE + year,
+    data = df_noNA,
+    family = binomial
+  )
+}
+
+summary(modelround1_more_variables)
+
+
+############################################################
+# 20. Create OR table for short logistic model
+############################################################
+
+# Extract coefficients.
+coef_table <- summary(modelround1_nocomplete)$coefficients
+
+# Build OR table.
+or_table_nocomplete <- data.frame(
+  Variable = rownames(coef_table),
+  Estimate = coef_table[, "Estimate"],
+  Std_Error = coef_table[, "Std. Error"],
+  p_value = coef_table[, "Pr(>|z|)"]
+)
+
+# Calculate OR and Wald 95% CI.
+or_table_nocomplete <- or_table_nocomplete %>%
+  mutate(
+    OR = exp(Estimate),
+    CI_lower = exp(Estimate - 1.96 * Std_Error),
+    CI_upper = exp(Estimate + 1.96 * Std_Error)
+  ) %>%
+  select(Variable, OR, CI_lower, CI_upper, p_value) %>%
+  mutate(
+    OR = round(OR, 3),
+    CI_lower = round(CI_lower, 3),
+    CI_upper = round(CI_upper, 3),
+    p_value = round(p_value, 4)
+  )
+
+# View and export OR table.
+or_table_nocomplete
+write_xlsx(or_table_nocomplete, "modelround1_nocomplete_OR_table.xlsx")
+
+
+############################################################
+# 21. Weighted logistic regression for QC failure
+############################################################
+
+# Because QC failures are rare, a weighted logistic model was tested.
+# QC fail samples receive a larger weight to compensate for class imbalance.
+model_weighted <- glm(
+  qc_fail ~ log_dna + collector_type + cytology_group,
+  data = df_noNA,
+  family = binomial,
+  weights = ifelse(df_noNA$qc_fail == 1, 20, 1)
+)
+
+summary(model_weighted)
+
+# Extract weighted model coefficients.
+coef_table_weighted <- summary(model_weighted)$coefficients
+
+# Build OR table for weighted model.
+or_table_weighted <- data.frame(
+  Variable = rownames(coef_table_weighted),
+  Estimate = coef_table_weighted[, "Estimate"],
+  Std_Error = coef_table_weighted[, "Std. Error"],
+  p_value = coef_table_weighted[, "Pr(>|z|)"]
+)
+
+or_table_weighted <- or_table_weighted %>%
+  mutate(
+    OR = exp(Estimate),
+    CI_lower = exp(Estimate - 1.96 * Std_Error),
+    CI_upper = exp(Estimate + 1.96 * Std_Error)
+  ) %>%
+  select(Variable, OR, CI_lower, CI_upper, p_value)
+
+# View and export weighted OR table.
+or_table_weighted
+write_xlsx(or_table_weighted, "modelfinalglmOR_table.xlsx")
+
+
+############################################################
+# 22. Linear regression models for call rate
+############################################################
+
+# Short linear model:
+# Outcome: call_rate
+# Predictors: log DNA, collector type and cytology group.
+model_linear_full <- lm(
+  call_rate ~ log_dna + collector_type + cytology_group,
+  data = df_noNA
+)
+
+summary(model_linear_full)
+
+# Create coefficient table with confidence intervals.
+coef_table_linear <- summary(model_linear_full)$coefficients
+ci_linear <- confint(model_linear_full)
+
+results_linear <- data.frame(
+  Variable = rownames(coef_table_linear),
+  Coefficient = round(coef_table_linear[, "Estimate"], 4),
+  CI_lower = round(ci_linear[, 1], 4),
+  CI_upper = round(ci_linear[, 2], 4),
+  p_value = round(coef_table_linear[, "Pr(>|t|)"], 4)
+)
+
+results_linear
+write_xlsx(results_linear, "model_linear_full_results.xlsx")
+
+# Extended linear model for call rate.
+if ("sample_year" %in% names(df_noNA) & "volume" %in% names(df_noNA)) {
+  model_linear_full2 <- lm(
+    call_rate ~ log_dna + collector_type + cytology_group +
+      hpv_final + AGE + sample_year + volume,
+    data = df_noNA
+  )
+} else {
+  model_linear_full2 <- lm(
+    call_rate ~ log_dna + collector_type + cytology_group +
+      hpv_final + AGE + year,
+    data = df_noNA
+  )
+}
+
+summary(model_linear_full2)
+
+
+############################################################
+# 23. ROC curve for QC failure model
+############################################################
+
+# Predicted probability of QC failure from the short logistic model.
+pred_prob <- predict(
+  modelround1_nocomplete,
+  type = "response"
+)
+
+# ROC curve and AUC.
+roc_obj <- roc(df_noNA$qc_fail, pred_prob)
+auc_value <- auc(roc_obj)
+
+# Plot ROC curve.
+plot(
+  roc_obj,
+  col = "blue",
+  lwd = 3,
+  main = paste("ROC Curve - QC Failure Model\nAUC =", round(auc_value, 3))
+)
+
+
+############################################################
+# 24. Predicted probability distribution by QC outcome
+############################################################
+
+# Create plotting dataframe.
+df_plot <- data.frame(
+  pred_prob = pred_prob,
+  qc_fail = factor(df_noNA$qc_fail)
+)
+
+# Density plot of predicted probabilities.
+ggplot(df_plot, aes(x = pred_prob, fill = qc_fail)) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Predicted probability of QC failure",
+    x = "Predicted probability",
+    fill = "QC outcome"
+  ) +
+  theme_minimal()
+
+
+############################################################
+# 25. Diagnostic plots for linear model
+############################################################
+
+# Standard diagnostic plots:
+# 1. Residuals vs fitted
+# 2. Normal Q-Q plot
+# 3. Scale-location plot
+# 4. Residuals vs leverage
+par(mfrow = c(2, 2))
+plot(model_linear_full)
+par(mfrow = c(1, 1))
+
+
+############################################################
+# 26. Save final objects
+############################################################
+
+# Save cleaned dataframes and models.
+saveRDS(df, "extended_clinical_qc_dataframe.rds")
+saveRDS(df_noNA, "extended_clinical_qc_complete_cases.rds")
+saveRDS(modelround1_nocomplete, "modelround1_nocomplete.rds")
+saveRDS(modelround1_more_variables, "modelround1_more_variables.rds")
+saveRDS(model_weighted, "model_weighted_qc_fail.rds")
+saveRDS(model_linear_full, "model_linear_full.rds")
+saveRDS(model_linear_full2, "model_linear_full2.rds")
