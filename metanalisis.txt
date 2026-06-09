@@ -1,0 +1,274 @@
+############################################################
+# META-ANALYSIS OF ENDOMETRIAL CANCER-ASSOCIATED SNPs
+# Combining Round 1 and Round 2 PLINK association results
+#
+# Author: Cristina Ruiz Ballester
+# Project: Evaluation of DNA Quality and Case-Cohort Analysis
+#          of Endometrial Cancer-Associated SNPs
+############################################################
+
+
+############################################################
+# 0. Load required libraries
+############################################################
+
+# openxlsx is used to export the final results table to Excel.
+# ggplot2 is used to generate exploratory plots.
+library(openxlsx)
+library(ggplot2)
+
+
+############################################################
+# 1. Load R workspace
+############################################################
+
+# This file contains previously saved R objects, including PLINK
+# association results for Round 1 and Round 2.
+load("~/plink/Endometrial_cancer/R_EC/Obejcts_mds.RData")
+
+
+############################################################
+# 2. Prepare PLINK association results from Round 1
+############################################################
+
+# Rename the first column as CHROM if needed.
+# This step is useful when PLINK output has a first unnamed or
+# incorrectly named chromosome column.
+names(glm1)[1] <- "CHROM"
+
+# Keep only the additive genetic model results.
+# In PLINK, TEST == "ADD" corresponds to the additive model,
+# which assumes that each additional copy of the effect allele
+# changes the log-odds of disease by the same amount.
+glm_add <- subset(glm1, TEST == "ADD")
+
+# Clean SNP identifiers by removing technical array prefixes.
+# Some SNP IDs may contain prefixes such as "GSA-" or "exm-".
+# Removing them makes it easier to match SNPs across datasets.
+glm_add$ID <- gsub("^GSA-|^exm-", "", glm_add$ID)
+
+# Calculate odds ratios for Round 1.
+# PLINK provides BETA values on the log-odds scale.
+# Exponentiating BETA gives the odds ratio.
+glm_add$OR <- exp(glm_add$BETA)
+
+# Create a simplified Round 1 table containing only the variables
+# needed for meta-analysis.
+r1 <- glm_add[, c("ID", "A1", "BETA", "SE", "P")]
+
+
+############################################################
+# 3. Prepare PLINK association results from Round 2
+############################################################
+
+# Keep only the additive genetic model results from Round 2.
+glm2_add <- subset(glm2_add, TEST == "ADD")
+
+# Clean SNP identifiers in the same way as for Round 1.
+glm2_add$ID <- gsub("^GSA-|^exm-", "", glm2_add$ID)
+
+# Calculate odds ratios for Round 2.
+glm2_add$OR <- exp(glm2_add$BETA)
+
+# Create a simplified Round 2 table containing only the variables
+# needed for meta-analysis.
+r2 <- glm2_add[, c("ID", "A1", "BETA", "SE", "P")]
+
+
+############################################################
+# 4. Merge Round 1 and Round 2 results by SNP ID
+############################################################
+
+# Merge both datasets using the SNP identifier.
+# The suffixes _R1 and _R2 indicate whether each variable comes
+# from Round 1 or Round 2.
+meta_df <- merge(r1, r2, by = "ID", suffixes = c("_R1", "_R2"))
+
+# Check whether the effect allele is the same in both rounds.
+# This is essential because beta values can only be combined directly
+# if they refer to the same effect allele.
+meta_df$Same_A1 <- meta_df$A1_R1 == meta_df$A1_R2
+
+# Display the number of SNPs with matching and non-matching alleles.
+table(meta_df$Same_A1)
+
+
+############################################################
+# 5. Allele alignment check
+############################################################
+
+# If any SNP has a different effect allele between rounds, allele
+# harmonization is required before combining beta values.
+# This code warns the user if allele mismatches are present.
+if (any(meta_df$Same_A1 == FALSE)) {
+  warning("Some SNPs have different effect alleles between rounds. Allele harmonization is needed before meta-analysis.")
+}
+
+# In this version, Round 2 beta values are used directly only when
+# effect alleles are already aligned.
+# If allele harmonization has been performed separately, replace this
+# line with the harmonized beta column.
+meta_df$BETA_R2_aligned <- meta_df$BETA_R2
+
+
+############################################################
+# 6. Fixed-effect inverse-variance meta-analysis
+############################################################
+
+# Calculate inverse-variance weights for each round.
+# Estimates with smaller standard errors are more precise and therefore
+# receive higher weight in the meta-analysis.
+meta_df$w1 <- 1 / (meta_df$SE_R1^2)
+meta_df$w2 <- 1 / (meta_df$SE_R2^2)
+
+# Calculate the combined beta using a fixed-effect inverse-variance
+# weighted meta-analysis.
+meta_df$BETA_meta <- (
+  meta_df$w1 * meta_df$BETA_R1 +
+    meta_df$w2 * meta_df$BETA_R2_aligned
+) / (meta_df$w1 + meta_df$w2)
+
+# Calculate the standard error of the combined estimate.
+meta_df$SE_meta <- sqrt(1 / (meta_df$w1 + meta_df$w2))
+
+# Calculate the Z statistic for the meta-analysis.
+meta_df$Z_meta <- meta_df$BETA_meta / meta_df$SE_meta
+
+# Calculate the two-sided p-value from the Z statistic.
+meta_df$P_meta <- 2 * pnorm(-abs(meta_df$Z_meta))
+
+# Convert the combined beta into an odds ratio.
+meta_df$OR_meta <- exp(meta_df$BETA_meta)
+
+# Calculate the 95% confidence interval for the meta-analysis OR.
+meta_df$CI_lower <- exp(meta_df$BETA_meta - 1.96 * meta_df$SE_meta)
+meta_df$CI_upper <- exp(meta_df$BETA_meta + 1.96 * meta_df$SE_meta)
+
+# Apply Bonferroni correction to account for multiple SNP testing.
+meta_df$P_meta_bonf <- p.adjust(meta_df$P_meta, method = "bonferroni")
+
+
+############################################################
+# 7. Assess direction of effect
+############################################################
+
+# Classify the effect direction in each round.
+# Positive beta: risk effect.
+# Negative beta: protective effect.
+meta_df$Direction_R1 <- ifelse(meta_df$BETA_R1 > 0, "Risk", "Protective")
+meta_df$Direction_R2 <- ifelse(meta_df$BETA_R2_aligned > 0, "Risk", "Protective")
+
+# Check whether the direction of effect is consistent between rounds.
+meta_df$Direction_consistent <- meta_df$Direction_R1 == meta_df$Direction_R2
+
+
+############################################################
+# 8. Create final meta-analysis results table
+############################################################
+
+# Select the most relevant variables for the final output table.
+meta_table <- meta_df[, c(
+  "ID",
+  "A1_R1", "A1_R2", "Same_A1",
+  "BETA_R1", "SE_R1", "P_R1",
+  "BETA_R2_aligned", "SE_R2", "P_R2",
+  "BETA_meta", "SE_meta",
+  "OR_meta", "CI_lower", "CI_upper",
+  "P_meta", "P_meta_bonf",
+  "Direction_R1", "Direction_R2", "Direction_consistent"
+)]
+
+# Order SNPs by meta-analysis p-value.
+meta_table <- meta_table[order(meta_table$P_meta), ]
+
+# View the final table in RStudio.
+View(meta_table)
+
+# Export the final table to Excel.
+write.xlsx(
+  meta_table,
+  file = "meta_analysis_results_clean.xlsx",
+  rowNames = FALSE
+)
+
+
+############################################################
+# 9. Forest plot of meta-analysis results
+############################################################
+
+# This plot shows the meta-analysis odds ratio for each SNP
+# together with its 95% confidence interval.
+ggplot(meta_table, aes(x = OR_meta, y = reorder(ID, OR_meta))) +
+  geom_point(size = 2) +
+  geom_errorbar(
+    aes(xmin = CI_lower, xmax = CI_upper),
+    width = 0.2,
+    orientation = "y"
+  ) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    x = "Odds Ratio (meta-analysis)",
+    y = "SNP",
+    title = "Forest plot of SNP associations"
+  )
+
+
+############################################################
+# 10. Scatter plot comparing Round 1 and Round 2 effects
+############################################################
+
+# This plot compares the odds ratios estimated in Round 1 and Round 2.
+# Points close to the diagonal line indicate similar effects in both rounds.
+ggplot(meta_df, aes(x = exp(BETA_R1), y = exp(BETA_R2_aligned))) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    x = "Odds Ratio Round 1",
+    y = "Odds Ratio Round 2",
+    title = "Comparison of SNP effects between rounds"
+  )
+
+
+############################################################
+# 11. Volcano plot
+############################################################
+
+# This exploratory plot shows effect size on the x-axis and statistical
+# significance on the y-axis.
+ggplot(meta_df, aes(x = BETA_meta, y = -log10(P_meta))) +
+  geom_point() +
+  theme_minimal() +
+  labs(
+    x = "Meta-analysis beta",
+    y = "-log10(P-value)",
+    title = "Volcano plot of meta-analysis results"
+  )
+
+
+############################################################
+# 12. QQ plot of meta-analysis p-values
+############################################################
+
+# The QQ plot compares observed p-values with those expected under
+# the null hypothesis.
+observed <- -log10(sort(meta_df$P_meta))
+expected <- -log10(ppoints(length(meta_df$P_meta)))
+
+plot(
+  expected, observed,
+  xlab = "Expected -log10(P-value)",
+  ylab = "Observed -log10(P-value)",
+  main = "QQ plot of meta-analysis p-values"
+)
+
+abline(0, 1, col = "red")
+
+
+############################################################
+# 13. Save R workspace
+############################################################
+
+# Save the current R workspace, including the meta-analysis objects.
+save.image("~/plink/Endometrial_cancer/R_EC/Obejcts_mds.RData")
