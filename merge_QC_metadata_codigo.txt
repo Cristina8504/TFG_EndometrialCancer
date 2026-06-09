@@ -1,0 +1,674 @@
+############################################################
+# MERGE GENOTYPING QC WITH EXTRACTION/METADATA
+
+
+############################################################
+# 0. Load required libraries
+############################################################
+
+# dplyr is used for data manipulation.
+# ggplot2 is used for plotting.
+# readxl is used to read Excel files.
+# scales is used to format axes as percentages.
+# corrplot is used to plot correlation heatmaps.
+# pROC is used to evaluate logistic regression performance with ROC/AUC.
+# writexl is used to export final datasets to Excel.
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(scales)
+library(corrplot)
+library(pROC)
+library(writexl)
+
+
+############################################################
+# 1. Define file paths
+############################################################
+
+# Genotyping QC statistics file.
+# This file is expected to contain sample-level QC information,
+# including QC_pass, call_rate_raw and totdna_ng.
+qc_file <- "WK-3864_241205_QCstats.tsv"
+
+# Metadata/extraction file.
+# This file is expected to contain extraction-related variables,
+# such as DNA concentration, volume and total DNA.
+meta_file <- "WK-3864_240821_Conc_TotalDNA_KI.xlsx"
+
+
+############################################################
+# 2. Load QC/genotyping dataset
+############################################################
+
+# Read the QC statistics TSV file.
+qc <- read.delim(
+  qc_file,
+  sep = "\t",
+  header = TRUE,
+  stringsAsFactors = FALSE
+)
+
+# Quick inspection of the QC dataset.
+cat("QC dataset loaded. Rows:", nrow(qc), "Cols:", ncol(qc), "\n")
+print(head(qc))
+print(names(qc))
+
+
+############################################################
+# 3. Load metadata/extraction dataset
+############################################################
+
+# Read the Excel metadata/extraction file.
+meta <- read_excel(meta_file)
+
+# Quick inspection of the metadata dataset.
+cat("Metadata dataset loaded. Rows:", nrow(meta), "Cols:", ncol(meta), "\n")
+print(head(meta))
+print(names(meta))
+
+
+############################################################
+# 4. Identify and clean sample ID columns
+############################################################
+
+# In the QC file, the sample identifier is assumed to be LABEL_ID.
+# In the metadata file, the sample identifier is assumed to be Sample.
+# If your files use different names, modify these two lines.
+qc_id_col <- "LABEL_ID"
+meta_id_col <- "Sample"
+
+# Create raw ID columns for traceability.
+qc$QC_ID_raw <- qc[[qc_id_col]]
+meta$META_ID_raw <- meta[[meta_id_col]]
+
+# Create cleaned ID columns for merging.
+# This removes leading/trailing spaces and converts IDs to character.
+qc$ID_clean <- trimws(as.character(qc$QC_ID_raw))
+meta$ID_clean <- trimws(as.character(meta$META_ID_raw))
+
+# Check overlap before merging.
+overlap_n <- length(intersect(qc$ID_clean, meta$ID_clean))
+cat("Number of overlapping IDs (QC vs metadata):", overlap_n, "\n")
+
+
+############################################################
+# 5. Merge QC and metadata datasets
+############################################################
+
+# Left join keeps all QC samples and adds metadata columns where IDs match.
+merged_qc_metadata <- qc %>%
+  left_join(meta, by = "ID_clean")
+
+cat("Merged dataset rows:", nrow(merged_qc_metadata), "\n")
+cat("Merged dataset cols:", ncol(merged_qc_metadata), "\n")
+
+
+############################################################
+# 6. Create year variable from sample ID suffix
+############################################################
+
+# This assumes IDs end with "-YY", for example C2659-18.
+# Values <= 30 are interpreted as 2000s.
+# Values > 30 are interpreted as 1900s.
+merged_qc_metadata <- merged_qc_metadata %>%
+  mutate(
+    year_suffix = sub(".*-", "", ID_clean),
+    year_suffix_num = suppressWarnings(as.integer(year_suffix)),
+    year = ifelse(
+      !is.na(year_suffix_num),
+      ifelse(year_suffix_num <= 30, 2000 + year_suffix_num, 1900 + year_suffix_num),
+      NA
+    )
+  )
+
+cat("Year distribution:\n")
+print(sort(table(merged_qc_metadata$year), decreasing = TRUE))
+
+
+############################################################
+# 7. Clean and rename variables
+############################################################
+
+# Remove unnecessary technical columns and rename variables to clearer names.
+# Some column names may need to be adapted depending on the exact Excel headers.
+merged_qc_metadata_clean <- merged_qc_metadata %>%
+  select(
+    -year_suffix,
+    -year_suffix_num,
+    -META_ID_raw,
+    -ID_clean
+  ) %>%
+  rename(
+    dna_total_ng = totdna_ng,
+    call_rate = call_rate_raw,
+    qc_pass = QC_pass,
+    concentration_customer_ng_ul = Concentration..customer..ng.µl.,
+    concentration_current_ng_ul = Concentration..current..ng.µl.,
+    volume_customer_ul = Volume..customer..µl.,
+    volume_current_ul = Volume..current..µl.,
+    total_dna_current_ng = Total.DNA..current..ng.
+  )
+
+# Convert important variables to appropriate formats.
+merged_qc_metadata_clean <- merged_qc_metadata_clean %>%
+  mutate(
+    LABEL_ID = trimws(as.character(LABEL_ID)),
+    dna_total_ng = as.numeric(dna_total_ng),
+    call_rate = as.numeric(call_rate),
+    qc_pass = as.logical(qc_pass),
+    qc_fail = !qc_pass,
+    year = as.integer(year),
+    concentration_current_ng_ul = as.numeric(concentration_current_ng_ul),
+    volume_current_ul = as.numeric(volume_current_ul),
+    total_dna_current_ng = as.numeric(total_dna_current_ng)
+  )
+
+
+############################################################
+# 8. Create collector_type variable from sample ID prefix
+############################################################
+
+# Collector type is inferred from the sample ID prefix:
+#   C or GYN -> doctor
+#   Y        -> midwife
+#   other    -> unknown
+merged_qc_metadata_clean <- merged_qc_metadata_clean %>%
+  mutate(
+    collector_type = case_when(
+      grepl("^C", LABEL_ID) ~ "doctor",
+      grepl("^GYN", LABEL_ID) ~ "doctor",
+      grepl("^Y", LABEL_ID) ~ "midwife",
+      TRUE ~ "unknown"
+    )
+  )
+
+# Create a temporary prefix variable to audit the classification.
+merged_qc_metadata_clean <- merged_qc_metadata_clean %>%
+  mutate(
+    prefix = case_when(
+      grepl("^GYN", LABEL_ID) ~ "GYN",
+      grepl("^C", LABEL_ID) ~ "C",
+      grepl("^Y", LABEL_ID) ~ "Y",
+      TRUE ~ "other"
+    )
+  )
+
+# Check how many samples belong to each prefix.
+table(merged_qc_metadata_clean$prefix)
+
+# Remove temporary prefix variable.
+merged_qc_metadata_clean <- merged_qc_metadata_clean %>%
+  select(-prefix)
+
+
+############################################################
+# 9. Save merged and cleaned dataset
+############################################################
+
+# Save as TSV.
+write.table(
+  merged_qc_metadata_clean,
+  "merged_qc_metadata_clean.tsv",
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE
+)
+
+cat("Saved merged dataset: merged_qc_metadata_clean.tsv\n")
+
+# Save as CSV.
+write.csv(
+  merged_qc_metadata_clean,
+  "merged_qc_metadata_clean.csv",
+  row.names = FALSE
+)
+
+# Save as Excel.
+write_xlsx(
+  merged_qc_metadata_clean,
+  "merged_qc_metadata_clean.xlsx"
+)
+
+
+############################################################
+# 10. Quick visualization: DNA amount vs call rate
+############################################################
+
+# This plot helps visualize the relationship between DNA quantity and
+# genotyping performance.
+ggplot(
+  merged_qc_metadata_clean,
+  aes(x = total_dna_current_ng, y = call_rate, color = qc_pass)
+) +
+  geom_point(alpha = 0.7) +
+  labs(
+    title = "Relationship between DNA amount and genotyping call rate",
+    x = "Total DNA (ng)",
+    y = "Call rate",
+    color = "QC pass"
+  ) +
+  theme_minimal()
+
+
+############################################################
+# 11. Create audit table for variables
+############################################################
+
+# This table summarizes each variable:
+#   - R class
+#   - number of missing values
+#   - percentage of missing values
+#   - number of unique values
+audit_table <- data.frame(
+  variable = names(merged_qc_metadata_clean),
+  class_R = sapply(merged_qc_metadata_clean, class),
+  n_missing = sapply(merged_qc_metadata_clean, function(x) sum(is.na(x))),
+  pct_missing = round(
+    sapply(merged_qc_metadata_clean, function(x) mean(is.na(x)) * 100),
+    2
+  ),
+  n_unique = sapply(
+    merged_qc_metadata_clean,
+    function(x) dplyr::n_distinct(x, na.rm = TRUE)
+  )
+)
+
+print(audit_table)
+
+# Save audit table.
+write.csv(
+  audit_table,
+  "audit_table_merged_qc_metadata.csv",
+  row.names = FALSE
+)
+
+
+############################################################
+# 12. Distribution of dna_total_ng
+############################################################
+
+# Histogram.
+hist(
+  merged_qc_metadata_clean$dna_total_ng,
+  breaks = 30,
+  main = "Distribution of DNA total (ng)",
+  xlab = "DNA total (ng)"
+)
+
+# Density plot.
+plot(
+  density(merged_qc_metadata_clean$dna_total_ng, na.rm = TRUE),
+  main = "Density plot: DNA total (ng)"
+)
+
+# Boxplot.
+boxplot(
+  merged_qc_metadata_clean$dna_total_ng,
+  main = "Boxplot DNA total (ng)"
+)
+
+# Q-Q plot.
+qqnorm(merged_qc_metadata_clean$dna_total_ng)
+qqline(merged_qc_metadata_clean$dna_total_ng, col = "red")
+
+
+############################################################
+# 13. Distribution of call_rate
+############################################################
+
+# Histogram.
+hist(
+  merged_qc_metadata_clean$call_rate,
+  breaks = 30,
+  main = "Distribution of call rate",
+  xlab = "Call rate"
+)
+
+# Density plot.
+plot(
+  density(merged_qc_metadata_clean$call_rate, na.rm = TRUE),
+  main = "Density plot: call rate"
+)
+
+# Boxplot.
+boxplot(
+  merged_qc_metadata_clean$call_rate,
+  main = "Boxplot: call rate"
+)
+
+# Q-Q plot.
+qqnorm(merged_qc_metadata_clean$call_rate)
+qqline(merged_qc_metadata_clean$call_rate, col = "red")
+
+
+############################################################
+# 14. Univariable comparison: DNA total by QC outcome
+############################################################
+
+# Wilcoxon rank-sum test is used because DNA variables are often
+# non-normally distributed.
+wilcox_dna <- wilcox.test(
+  dna_total_ng ~ qc_pass,
+  data = merged_qc_metadata_clean
+)
+
+print(wilcox_dna)
+
+# Boxplot of DNA yield by QC outcome.
+ggplot(
+  merged_qc_metadata_clean,
+  aes(x = qc_pass, y = dna_total_ng)
+) +
+  geom_boxplot() +
+  labs(
+    x = "QC outcome",
+    y = "Total DNA (ng)",
+    title = "DNA yield by QC outcome"
+  ) +
+  theme_minimal()
+
+
+############################################################
+# 15. Univariable comparison: concentration by QC outcome
+############################################################
+
+# Wilcoxon rank-sum test for DNA concentration by QC outcome.
+wilcox_conc <- wilcox.test(
+  concentration_current_ng_ul ~ qc_pass,
+  data = merged_qc_metadata_clean
+)
+
+print(wilcox_conc)
+
+
+############################################################
+# 16. Categorical analysis: collector type and QC outcome
+############################################################
+
+# Contingency table.
+collector_tab <- table(
+  merged_qc_metadata_clean$collector_type,
+  merged_qc_metadata_clean$qc_pass
+)
+
+print(collector_tab)
+
+# Chi-square test.
+# This evaluates whether QC outcome is independent of collector type.
+chisq_collector <- chisq.test(collector_tab)
+print(chisq_collector)
+
+# Plot QC outcome by collector type.
+ggplot(
+  merged_qc_metadata_clean,
+  aes(x = collector_type, fill = qc_pass)
+) +
+  geom_bar(position = "fill") +
+  labs(
+    x = "Collector type",
+    y = "Proportion of samples",
+    fill = "QC outcome",
+    title = "QC outcome by collector type"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+
+# Proportions by collector type.
+prop.table(collector_tab, margin = 1)
+
+
+############################################################
+# 17. Categorical analysis: year and QC outcome
+############################################################
+
+# Chi-square test with Monte Carlo simulation.
+# This is useful when some year categories have few QC failures and
+# expected cell counts may be low.
+year_tab <- table(
+  merged_qc_metadata_clean$year,
+  merged_qc_metadata_clean$qc_pass
+)
+
+chisq_year <- chisq.test(
+  year_tab,
+  simulate.p.value = TRUE
+)
+
+print(chisq_year)
+
+# Plot QC outcome by year.
+ggplot(
+  merged_qc_metadata_clean,
+  aes(x = factor(year), fill = qc_pass)
+) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "QC outcome by year",
+    x = "Year of extraction",
+    y = "Proportion of samples",
+    fill = "QC outcome"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+
+
+############################################################
+# 18. Correlation: dna_total_ng vs call_rate
+############################################################
+
+# Select variables and remove missing values.
+df_test <- merged_qc_metadata_clean %>%
+  select(dna_total_ng, call_rate) %>%
+  filter(!is.na(dna_total_ng), !is.na(call_rate))
+
+cat("Number of samples for correlation:", nrow(df_test), "\n")
+summary(df_test)
+
+# Histograms.
+ggplot(df_test, aes(x = dna_total_ng)) +
+  geom_histogram(bins = 30) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of dna_total_ng",
+    x = "dna_total_ng",
+    y = "Count"
+  )
+
+ggplot(df_test, aes(x = call_rate)) +
+  geom_histogram(bins = 30) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of call_rate",
+    x = "call_rate",
+    y = "Count"
+  )
+
+# Q-Q plots.
+qqnorm(df_test$dna_total_ng, main = "Q-Q plot: dna_total_ng")
+qqline(df_test$dna_total_ng)
+
+qqnorm(df_test$call_rate, main = "Q-Q plot: call_rate")
+qqline(df_test$call_rate)
+
+# Shapiro-Wilk normality tests.
+# For large samples, Shapiro-Wilk can be overly sensitive.
+if (nrow(df_test) <= 5000) {
+  shapiro_dna <- shapiro.test(df_test$dna_total_ng)
+  shapiro_call <- shapiro.test(df_test$call_rate)
+
+  print(shapiro_dna)
+  print(shapiro_call)
+
+  normal_dna <- shapiro_dna$p.value > 0.05
+  normal_call <- shapiro_call$p.value > 0.05
+} else {
+  cat("Sample size > 5000: skipping Shapiro-Wilk test.\n")
+  normal_dna <- FALSE
+  normal_call <- FALSE
+}
+
+# Choose Pearson if both variables are normally distributed.
+# Otherwise, use Spearman correlation.
+if (normal_dna & normal_call) {
+  test_result <- cor.test(
+    df_test$dna_total_ng,
+    df_test$call_rate,
+    method = "pearson"
+  )
+  chosen_test <- "Pearson correlation"
+} else {
+  test_result <- cor.test(
+    df_test$dna_total_ng,
+    df_test$call_rate,
+    method = "spearman"
+  )
+  chosen_test <- "Spearman correlation"
+}
+
+cat("\nChosen test:", chosen_test, "\n")
+print(test_result)
+
+# Scatter plot with linear trend.
+ggplot(df_test, aes(x = dna_total_ng, y = call_rate)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE) +
+  theme_minimal() +
+  labs(
+    title = "Relationship between dna_total_ng and call_rate",
+    subtitle = paste("Test used:", chosen_test),
+    x = "dna_total_ng",
+    y = "call_rate"
+  )
+
+
+############################################################
+# 19. Correlation heatmap for continuous variables
+############################################################
+
+# Select continuous numeric variables.
+df_cont <- merged_qc_metadata_clean %>%
+  select(
+    dna_total_ng,
+    concentration_current_ng_ul,
+    volume_current_ul,
+    call_rate,
+    year
+  )
+
+# Calculate Spearman correlation matrix.
+cor_matrix <- cor(
+  df_cont,
+  use = "pairwise.complete.obs",
+  method = "spearman"
+)
+
+# Plot correlation heatmap.
+corrplot(
+  cor_matrix,
+  method = "color",
+  type = "upper",
+  tl.col = "black",
+  tl.cex = 0.8,
+  addCoef.col = "black",
+  number.cex = 0.6
+)
+
+
+############################################################
+# 20. Logistic regression model for QC outcome
+############################################################
+
+# This model evaluates whether DNA amount, collector type and year
+# are associated with the probability of passing QC.
+model_logistic <- glm(
+  qc_pass ~ dna_total_ng + collector_type + year,
+  data = merged_qc_metadata_clean,
+  family = binomial
+)
+
+summary(model_logistic)
+
+
+############################################################
+# 21. ROC curve and AUC for logistic model
+############################################################
+
+# Predicted probability of QC pass.
+prob <- predict(model_logistic, type = "response")
+
+# ROC curve.
+roc_curve <- roc(
+  merged_qc_metadata_clean$qc_pass,
+  prob
+)
+
+# Plot ROC curve.
+plot(roc_curve)
+
+# Calculate AUC.
+auc(roc_curve)
+
+
+############################################################
+# 22. Linear regression model for call rate
+############################################################
+
+# Since call rate is continuous, a linear regression model can be used
+# to evaluate whether DNA amount, collector type and year explain
+# variability in genotyping call rate.
+model_linear <- lm(
+  call_rate ~ dna_total_ng + collector_type + year,
+  data = merged_qc_metadata_clean
+)
+
+summary(model_linear)
+
+# Diagnostic plots for the linear model.
+par(mfrow = c(2, 2))
+plot(model_linear)
+par(mfrow = c(1, 1))
+
+
+############################################################
+# 23. Call rate by collector type
+############################################################
+
+# Boxplot showing call rate distribution by collector type.
+ggplot(
+  merged_qc_metadata_clean,
+  aes(x = collector_type, y = call_rate)
+) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(
+    title = "Call rate by collector type",
+    x = "Collector type",
+    y = "Call rate"
+  )
+
+
+############################################################
+# 24. Save important R objects
+############################################################
+
+# Save final cleaned dataset and relevant model objects.
+saveRDS(
+  merged_qc_metadata_clean,
+  "merged_qc_metadata_clean.rds"
+)
+
+saveRDS(
+  audit_table,
+  "audit_table_merged_qc_metadata.rds"
+)
+
+saveRDS(
+  model_logistic,
+  "qc_logistic_model.rds"
+)
+
+saveRDS(
+  model_linear,
+  "callrate_linear_model.rds"
+)
