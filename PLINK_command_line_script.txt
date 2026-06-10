@@ -1,0 +1,242 @@
+
+REM ============================================================
+REM PLINK COMMAND LINE ANALYSIS SCRIPT
+REM Endometrial cancer candidate SNP analysis
+
+REM 0. DEFINE PATHS
+
+
+REM Path to PLINK executable
+set PLINK=C:\Users\crirui\OneDrive - Karolinska Institutet\Documents\plink\plink.exe
+
+REM Path to PLINK2 executable, only needed if running --glm
+set PLINK2=C:\Users\crirui\OneDrive - Karolinska Institutet\Documents\plink\plink2.exe
+
+REM Round 1 post-QC genotype dataset
+set BFILE_R1=P:\H9_Dillner\PROJECTS\PsyCan\Data\SNP data EmCa\Data\DerivedData\QC\rp_emc\qc\emc_psycn_eur_rk-qc1
+
+REM Round 2 post-QC genotype dataset
+set BFILE_R2=P:\H9_Dillner\PROJECTS\PsyCan\Data\SNP data EmCa\Data_20-APR-2026\PsyCan_250610_EMC_geno_QC\Data\DerivedData\QC\rp_emc\qc\emc_psycn2_eur_rk-qc1
+
+REM Candidate SNP list using the exact SNP IDs present in the .bim file
+set SNP_LIST=C:\Users\crirui\OneDrive - Karolinska Institutet\Documents\plink\snps_interest_real.txt
+
+REM HNF1B/17q12 SNP list for LD analysis
+set HNF1B_SNPS=C:\Users\crirui\OneDrive - Karolinska Institutet\Documents\plink\hnf1b_snps.txt
+
+REM Covariate files containing FID, IID, age and PC1-PC5
+set COVAR_R1=C:\Users\crirui\OneDrive - Karolinska Institutet\Documents\plink\covar_round1.txt
+set COVAR_R2=C:\Users\crirui\OneDrive - Karolinska Institutet\Documents\plink\covar_round2.txt
+
+REM Output folder
+set OUTDIR=C:\Users\crirui\OneDrive - Karolinska Institutet\Documents\plink\Endometrial_cancer\PLINK_outputs
+
+
+REM 1. BASIC DATASET DESCRIPTION: ALLELE FREQUENCIES
+
+
+REM Round 1: calculate allele frequencies for all variants
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--freq ^
+--out "%OUTDIR%\round1_all_variants_freq"
+
+REM Round 2: calculate allele frequencies for all variants
+"%PLINK%" ^
+--bfile "%BFILE_R2%" ^
+--freq ^
+--out "%OUTDIR%\round2_all_variants_freq"
+
+REM 2. EXTRACT CANDIDATE SNPs AND CALCULATE FREQUENCIES
+
+
+REM Round 1: extract candidate SNPs and calculate frequencies
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--extract "%SNP_LIST%" ^
+--freq ^
+--out "%OUTDIR%\round1_snps_interest_freq"
+
+REM Round 2: extract candidate SNPs and calculate frequencies
+"%PLINK%" ^
+--bfile "%BFILE_R2%" ^
+--extract "%SNP_LIST%" ^
+--freq ^
+--out "%OUTDIR%\round2_snps_interest_freq"
+
+
+REM 3. SNP-LEVEL MISSINGNESS
+
+
+REM Round 1: genotype missingness for candidate SNPs
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--extract "%SNP_LIST%" ^
+--missing ^
+--out "%OUTDIR%\round1_snps_interest_missing"
+
+REM Round 2: genotype missingness for candidate SNPs
+"%PLINK%" ^
+--bfile "%BFILE_R2%" ^
+--extract "%SNP_LIST%" ^
+--missing ^
+--out "%OUTDIR%\round2_snps_interest_missing"
+
+
+REM 4. HARDY-WEINBERG EQUILIBRIUM
+
+
+REM Round 1: HWE test for candidate SNPs
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--extract "%SNP_LIST%" ^
+--hardy ^
+--out "%OUTDIR%\round1_snps_interest_hardy"
+
+REM Round 2: HWE test for candidate SNPs
+"%PLINK%" ^
+--bfile "%BFILE_R2%" ^
+--extract "%SNP_LIST%" ^
+--hardy ^
+--out "%OUTDIR%\round2_snps_interest_hardy"
+
+
+REM 5. BASIC ALLELIC ASSOCIATION
+
+REM Round 1: allelic association test
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--extract "%SNP_LIST%" ^
+--assoc ^
+--out "%OUTDIR%\round1_snps_assoc_results"
+
+REM Round 2: allelic association test
+"%PLINK%" ^
+--bfile "%BFILE_R2%" ^
+--extract "%SNP_LIST%" ^
+--assoc ^
+--out "%OUTDIR%\round2_snps_assoc_results"
+
+
+REM 6. ADJUSTED LOGISTIC REGRESSION WITH PLINK 1.9
+
+REM Round 1: logistic regression adjusted for age and PC1-PC5
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--extract "%SNP_LIST%" ^
+--logistic hide-covar ^
+--covar "%COVAR_R1%" ^
+--covar-name age PC1 PC2 PC3 PC4 PC5 ^
+--out "%OUTDIR%\round1_snps_logistic_adjusted"
+
+REM Round 2: logistic regression adjusted for age and PC1-PC5
+"%PLINK%" ^
+--bfile "%BFILE_R2%" ^
+--extract "%SNP_LIST%" ^
+--logistic hide-covar ^
+--covar "%COVAR_R2%" ^
+--covar-name age PC1 PC2 PC3 PC4 PC5 ^
+--out "%OUTDIR%\round2_snps_logistic_adjusted"
+
+
+REM 7. PLINK2 GLM LOGISTIC REGRESSION
+
+REM Round 1: PLINK2 adjusted logistic regression
+"%PLINK2%" ^
+--bfile "%BFILE_R1%" ^
+--extract "%SNP_LIST%" ^
+--covar "%COVAR_R1%" ^
+--covar-name age PC1 PC2 PC3 PC4 PC5 ^
+--glm hide-covar ^
+--out "%OUTDIR%\round1_snps_plink2_glm_adjusted"
+
+REM Round 2: PLINK2 adjusted logistic regression
+"%PLINK2%" ^
+--bfile "%BFILE_R2%" ^
+--extract "%SNP_LIST%" ^
+--covar "%COVAR_R2%" ^
+--covar-name age PC1 PC2 PC3 PC4 PC5 ^
+--glm hide-covar ^
+--out "%OUTDIR%\round2_snps_plink2_glm_adjusted"
+
+
+REM 8. ADDITIONAL MODEL-BASED ASSOCIATION TESTS
+
+REM Round 1: dominant model
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--extract "%SNP_LIST%" ^
+--model dominant ^
+--out "%OUTDIR%\round1_snps_model_dominant"
+
+REM Round 1: recessive model
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--extract "%SNP_LIST%" ^
+--model recessive ^
+--out "%OUTDIR%\round1_snps_model_recessive"
+
+REM Round 1: all model-based tests
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--extract "%SNP_LIST%" ^
+--model ^
+--out "%OUTDIR%\round1_snps_model_all"
+
+REM Round 2: dominant model
+"%PLINK%" ^
+--bfile "%BFILE_R2%" ^
+--extract "%SNP_LIST%" ^
+--model dominant ^
+--out "%OUTDIR%\round2_snps_model_dominant"
+
+REM Round 2: recessive model
+"%PLINK%" ^
+--bfile "%BFILE_R2%" ^
+--extract "%SNP_LIST%" ^
+--model recessive ^
+--out "%OUTDIR%\round2_snps_model_recessive"
+
+REM Round 2: all model-based tests
+"%PLINK%" ^
+--bfile "%BFILE_R2%" ^
+--extract "%SNP_LIST%" ^
+--model ^
+--out "%OUTDIR%\round2_snps_model_all"
+
+
+REM 9. LINKAGE DISEQUILIBRIUM ANALYSIS: HNF1B/17q12
+
+REM Round 1: pairwise LD between rs7501939 and rs11651755
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--ld rs7501939 rs11651755 ^
+--out "%OUTDIR%\round1_ld_rs7501939_rs11651755"
+
+REM Round 1: pairwise LD between rs7501939 and rs4430796
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--ld rs7501939 rs4430796 ^
+--out "%OUTDIR%\round1_ld_rs7501939_rs4430796"
+
+REM Round 1: pairwise LD between rs4430796 and rs11651755
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--ld rs4430796 rs11651755 ^
+--out "%OUTDIR%\round1_ld_rs4430796_rs11651755"
+
+REM Round 1: LD matrix for HNF1B/17q12 SNPs
+"%PLINK%" ^
+--bfile "%BFILE_R1%" ^
+--extract "%HNF1B_SNPS%" ^
+--r2 square ^
+--out "%OUTDIR%\round1_hnf1b_ld_matrix"
+
+REM Round 2: LD matrix for HNF1B/17q12 SNPs
+"%PLINK%" ^
+--bfile "%BFILE_R2%" ^
+--extract "%HNF1B_SNPS%" ^
+--r2 square ^
+--out "%OUTDIR%\round2_hnf1b_ld_matrix"
+
+
